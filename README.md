@@ -113,3 +113,54 @@ This script tests:
 3. Unreachable repository blocks.
 4. Successful project creation.
 5. Async deployment status polling and console logging output.
+
+---
+
+## 7. DeployForge Architecture & Features (V3 Upgrade)
+
+### System Architecture Diagram
+DeployForge uses a decoupled, event-driven architecture to guarantee zero compilation overhead during static serving, asynchronous parallel builds, and low latency database tracking.
+
+```mermaid
+graph TD
+    User([Developer Browser]) -->|HTTP REST| Backend[Spring Boot 3 API Server]
+    User -->|STOMP WebSockets| WsBroker[Spring WebSocket Broker]
+    
+    Webhook[GitHub Webhook Push] -->|HMAC Verified Push| Backend
+    
+    Backend -->|Metadata State| PostgreSQL[(PostgreSQL)]
+    Backend -->|Log append| MongoDB[(MongoDB)]
+    Backend -->|Enqueues Tasks| Redis[(Redis Queue)]
+    
+    Worker[Deployment Background Worker] -->|Pulls Task| Redis
+    Worker -->|1. JGit Clone| GitRepo[Git Source Code]
+    Worker -->|2. Detect Framework| Detector[Type Detector]
+    Worker -->|3. Build Compiler| Builder[Maven/Node Compiler]
+    Worker -->|4. Docker Build| DockerDaemon[Docker Host Engine]
+    
+    DockerDaemon -->|Spawns Runs| Container[Isolated User Web App]
+    Backend -->|On-demand Stats| DockerDaemon
+```
+
+### Features Tour
+
+#### 🤖 GitHub Auto-Deployments
+Connect repository webhooks with automated HMAC-SHA256 signature checking and replay protection to securely queue runs on git push event triggers.
+
+#### ⚡ Real-Time Streaming Logs & Milestones
+Console logs and status updates are piped instantly from the backend to the frontend using STOMP WebSocket channels on top of SockJS fallbacks.
+
+#### 📦 Docker Runtime Management
+DeployForge automatically builds optimized multi-stage Docker containers for Node.js, React, Spring Boot, and static HTML platforms, mapping free ports dynamically on the host daemon.
+
+#### 🔐 Encrypted Environment Variables
+Keys and secrets are encrypted in PostgreSQL via strong AES-256-GCM, masked as `••••••••` across all HTTP boundaries, and safely injected into active Docker processes via `-e` parameters.
+
+#### 📊 Live Container Performance Metrics
+Dynamic CPU load percentage, Memory footprint, and container Uptime are scraped dynamically on-demand from the Docker engine using a thread-safe 5-second caching strategy.
+
+#### ⏳ Chronological Events Timeline
+Every deploy action records clear milestones (`WEBHOOK_RECEIVED`, `QUEUED`, `CLONING`, etc.) allowing developers to easily debug failing pipelines.
+
+#### 🔄 Manual Redeployments
+Schedule immediate deployment runs of specific historical commit versions with a single click.
