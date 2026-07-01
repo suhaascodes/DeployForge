@@ -1,0 +1,55 @@
+spring:
+  application:
+    name: deployforge-backend
+
+  # Database configuration
+  datasource:
+    url: jdbc:postgresql://localhost:5432/deployforge
+    username: deployforge
+    password: deployforge_secure_pass
+    driver-class-name: org.postgresql.Driver
+
+  # JPA & Hibernate configuration
+  jpa:
+    database: postgresql
+    show-sql: true
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  # Flyway database migrations
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+
+  # Redis configuration
+  data:
+    redis:
+      host: localhost
+      port: 6379
+
+  # MongoDB configuration
+  mongodb:
+    uri: mongodb://localhost:27017/deployforge
+
+# JWT Configuration
+app:
+  jwt:
+    secret: DeployForgeSuperSecureJWTSecretKeyForSigningJWTTokensMustBeAtLeast256BitsLong
+    expiration-ms: 86400000 # 24 Hours
+
+# OpenAPI documentation configuration
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+
+# Server Port
+server:
+  port: 8080
