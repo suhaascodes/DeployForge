@@ -24,9 +24,15 @@ import java.util.UUID;
 public class DeploymentController {
 
     private final DeploymentService deploymentService;
+    private final com.deployforge.deployment.service.MetricsCollectionService metricsCollectionService;
+    private final com.deployforge.deployment.repository.DeploymentRuntimeRepository deploymentRuntimeRepository;
 
-    public DeploymentController(DeploymentService deploymentService) {
+    public DeploymentController(DeploymentService deploymentService,
+                                com.deployforge.deployment.service.MetricsCollectionService metricsCollectionService,
+                                com.deployforge.deployment.repository.DeploymentRuntimeRepository deploymentRuntimeRepository) {
         this.deploymentService = deploymentService;
+        this.metricsCollectionService = metricsCollectionService;
+        this.deploymentRuntimeRepository = deploymentRuntimeRepository;
     }
 
     @PostMapping
@@ -64,5 +70,44 @@ public class DeploymentController {
             @AuthenticationPrincipal UserPrincipal principal) {
         List<DeploymentResponse> response = deploymentService.listRecentDeployments(principal.getId());
         return ResponseEntity.ok(ApiResponse.success(response));
+    }
+
+    @PostMapping("/{id}/redeploy")
+    @Operation(summary = "Redeploy commit", description = "Queues a manual redeployment of the commit details in a specific deployment run")
+    public ResponseEntity<ApiResponse<DeploymentResponse>> redeploy(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        DeploymentResponse response = deploymentService.redeploy(id, principal.getId());
+        return ResponseEntity
+                .status(HttpStatus.ACCEPTED)
+                .body(ApiResponse.success(response, "Redeployment queued successfully"));
+    }
+
+    @GetMapping("/{id}/events")
+    @Operation(summary = "Get deployment events timeline", description = "Retrieves chronological timeline events for a deployment run")
+    public ResponseEntity<ApiResponse<List<com.deployforge.deployment.dto.DeploymentEventDto>>> getDeploymentEvents(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        List<com.deployforge.deployment.dto.DeploymentEventDto> response = deploymentService.getDeploymentEvents(id, principal.getId());
+        return ResponseEntity.ok(ApiResponse.success(response));
+    }
+
+    @GetMapping("/{id}/metrics")
+    @Operation(summary = "Get container live metrics", description = "Query dynamic CPU, Memory, and Uptime on-demand from the Docker daemon")
+    public ResponseEntity<ApiResponse<com.deployforge.deployment.dto.ContainerMetricsDto>> getMetrics(
+            @PathVariable UUID id,
+            @AuthenticationPrincipal UserPrincipal principal) {
+        DeploymentResponse dep = deploymentService.getDeployment(id, principal.getId());
+        if (dep.getContainerName() == null || dep.getContainerName().trim().isEmpty() || !"RUNNING".equals(dep.getStatus().name())) {
+            return ResponseEntity.ok(ApiResponse.success(
+                    com.deployforge.deployment.dto.ContainerMetricsDto.builder()
+                            .cpuUsagePercent(0.0)
+                            .memoryUsageMb(0.0)
+                            .uptimeSeconds(0L)
+                            .build()
+            ));
+        }
+        com.deployforge.deployment.dto.ContainerMetricsDto metrics = metricsCollectionService.getRuntimeMetrics(dep.getContainerName());
+        return ResponseEntity.ok(ApiResponse.success(metrics));
     }
 }

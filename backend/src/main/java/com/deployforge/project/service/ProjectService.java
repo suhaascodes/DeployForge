@@ -42,6 +42,7 @@ public class ProjectService {
                 .description(request.getDescription())
                 .repositoryUrl(request.getRepositoryUrl())
                 .owner(owner)
+                .webhookSecret("df_sec_" + UUID.randomUUID().toString().replace("-", ""))
                 .build();
 
         Project savedProject = projectRepository.save(project);

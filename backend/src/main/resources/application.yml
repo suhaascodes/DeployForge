@@ -53,3 +53,8 @@ springdoc:
 # Server Port
 server:
   port: 8080
+
+# V3 Platform Configuration
+deployforge:
+  encryption:
+    key: ${DEPLOYFORGE_ENCRYPTION_KEY}

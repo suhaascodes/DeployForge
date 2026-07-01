@@ -39,10 +39,17 @@ public class RepositoryCloneService {
 
             Repository jgitRepo = git.getRepository();
             String branchName = jgitRepo.getBranch();
-            ObjectId head = jgitRepo.resolve("HEAD");
-            String commitHash = head != null ? head.getName() : "unknown";
+            String commitHash;
 
-            log.info("Successfully checked out branch: {} at commit: {}", branchName, commitHash);
+            if (deployment.getGithubCommitHash() != null && !deployment.getGithubCommitHash().trim().isEmpty()) {
+                git.checkout().setName(deployment.getGithubCommitHash()).call();
+                commitHash = deployment.getGithubCommitHash();
+                log.info("Successfully checked out specific commit: {}", commitHash);
+            } else {
+                ObjectId head = jgitRepo.resolve("HEAD");
+                commitHash = head != null ? head.getName() : "unknown";
+                log.info("Successfully checked out branch: {} at commit: {}", branchName, commitHash);
+            }
 
             // Persist the resolved version metadata
             DeploymentVersion version = DeploymentVersion.builder()

@@ -31,7 +31,7 @@ public class ContainerRuntimeService {
         this.logService = logService;
     }
 
-    public DeploymentRuntime startContainer(Deployment deployment, ProjectType projectType) throws Exception {
+    public DeploymentRuntime startContainer(Deployment deployment, ProjectType projectType, java.util.List<String> envVars) throws Exception {
         UUID deploymentId = deployment.getId();
         UUID projectId = deployment.getProject().getId();
 
@@ -45,7 +45,7 @@ public class ContainerRuntimeService {
 
         logService.info(deploymentId.toString(), "Starting Docker container: " + containerName + " (Exposing Port: " + hostPort + ")", LogCategory.RUNTIME);
 
-        String containerId = runDockerContainer(deploymentId.toString(), imageName, imageTag, containerName, hostPort, containerPort);
+        String containerId = runDockerContainer(deploymentId.toString(), imageName, imageTag, containerName, hostPort, containerPort, envVars);
         logService.info(deploymentId.toString(), "Container launched with ID: " + containerId.substring(0, 12), LogCategory.RUNTIME);
 
         // Perform active HTTP connection checks (up to 45 seconds)
@@ -86,16 +86,28 @@ public class ContainerRuntimeService {
         }
     }
 
-    private String runDockerContainer(String deploymentId, String imageName, String imageTag, String containerName, int hostPort, int containerPort) throws Exception {
+    private String runDockerContainer(String deploymentId, String imageName, String imageTag, String containerName, int hostPort, int containerPort, java.util.List<String> envVars) throws Exception {
         String fullTag = imageName + ":" + imageTag;
         
-        // docker run -d -p hostPort:containerPort --name containerName imageName:imageTag
-        ProcessBuilder pb = new ProcessBuilder(
-                "docker", "run", "-d",
-                "-p", hostPort + ":" + containerPort,
-                "--name", containerName,
-                fullTag
-        );
+        java.util.List<String> cmd = new java.util.ArrayList<>();
+        cmd.add("docker");
+        cmd.add("run");
+        cmd.add("-d");
+        cmd.add("-p");
+        cmd.add(hostPort + ":" + containerPort);
+        cmd.add("--name");
+        cmd.add(containerName);
+
+        if (envVars != null) {
+            for (String env : envVars) {
+                cmd.add("-e");
+                cmd.add(env);
+            }
+        }
+
+        cmd.add(fullTag);
+
+        ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
         Process process = pb.start();
 

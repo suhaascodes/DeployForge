@@ -20,6 +20,7 @@ public class ProjectResponse {
     private String repositoryUrl;
     private UUID ownerId;
     private LocalDateTime createdAt;
+    private String webhookSecret;
 
     public static ProjectResponse fromEntity(Project project) {
         return ProjectResponse.builder()
@@ -29,6 +30,7 @@ public class ProjectResponse {
                 .repositoryUrl(project.getRepositoryUrl())
                 .ownerId(project.getOwner().getId())
                 .createdAt(project.getCreatedAt())
+                .webhookSecret(project.getWebhookSecret())
                 .build();
     }
 }

@@ -33,6 +33,9 @@ public class DockerDeploymentExecutionEngine implements DeploymentExecutionEngin
     private final PreviewUrlGenerator previewUrlGenerator;
     private final LogService logService;
     private final DeploymentStatusUpdater deploymentStatusUpdater;
+    private final com.deployforge.project.repository.EnvironmentVariableRepository environmentVariableRepository;
+    private final com.deployforge.config.EncryptionService encryptionService;
+    private final MetricsCollectionService metricsCollectionService;
 
     public DockerDeploymentExecutionEngine(
             DeploymentRepository deploymentRepository,
@@ -45,7 +48,10 @@ public class DockerDeploymentExecutionEngine implements DeploymentExecutionEngin
             WorkspaceCleanupService workspaceCleanupService,
             PreviewUrlGenerator previewUrlGenerator,
             LogService logService,
-            DeploymentStatusUpdater deploymentStatusUpdater) {
+            DeploymentStatusUpdater deploymentStatusUpdater,
+            com.deployforge.project.repository.EnvironmentVariableRepository environmentVariableRepository,
+            com.deployforge.config.EncryptionService encryptionService,
+            MetricsCollectionService metricsCollectionService) {
         this.deploymentRepository = deploymentRepository;
         this.repositoryCloneService = repositoryCloneService;
         this.projectTypeDetector = projectTypeDetector;
@@ -57,11 +63,15 @@ public class DockerDeploymentExecutionEngine implements DeploymentExecutionEngin
         this.previewUrlGenerator = previewUrlGenerator;
         this.logService = logService;
         this.deploymentStatusUpdater = deploymentStatusUpdater;
+        this.environmentVariableRepository = environmentVariableRepository;
+        this.encryptionService = encryptionService;
+        this.metricsCollectionService = metricsCollectionService;
     }
 
     @Override
     public void execute(UUID deploymentId) {
         log.info("Execution engine running deployment task: {}", deploymentId);
+        long startTime = System.currentTimeMillis();
 
         // Fetch deployment details (eagerly resolving project/owner associations)
         Deployment deployment = deploymentRepository.findByIdWithProjectAndOwner(deploymentId).orElse(null);
@@ -72,6 +82,7 @@ public class DockerDeploymentExecutionEngine implements DeploymentExecutionEngin
 
         UUID projectId = deployment.getProject().getId();
         File workspaceDir = null;
+        String currentStage = "CLONING";
 
         try {
             // 1. Stop and remove previous container instances for this project (redeployments check)
@@ -94,31 +105,52 @@ public class DockerDeploymentExecutionEngine implements DeploymentExecutionEngin
             }
 
             // 4. Build Execution
+            currentStage = "BUILD";
             deploymentStatusUpdater.updateStatus(deploymentId, DeploymentStatus.BUILDING, null, type.name());
 
             buildExecutionService.executeBuild(deploymentId.toString(), workspaceDir, type);
 
             // 5. Generate Dockerfile and Compile Image
+            currentStage = "IMAGE";
             deploymentStatusUpdater.updateStatus(deploymentId, DeploymentStatus.CREATING_IMAGE);
 
             dockerBuildService.buildImage(deploymentId.toString(), projectId.toString(), workspaceDir, type);
 
+            // Fetch decrypted project environment variables
+            java.util.List<String> envVars = new java.util.ArrayList<>();
+            for (com.deployforge.project.entity.ProjectEnvironmentVariable env : environmentVariableRepository.findByProjectIdOrderByKeyAsc(projectId)) {
+                String decrypted = encryptionService.decrypt(env.getEncryptedValue());
+                envVars.add(env.getKey() + "=" + decrypted);
+            }
+
             // 6. Start Container & Network Mapping
+            currentStage = "RUNTIME";
             deploymentStatusUpdater.updateStatus(deploymentId, DeploymentStatus.STARTING_CONTAINER);
 
             // Need to reload the refreshed deployment entity to get correct timestamps/states
             Deployment refreshedDeployment = deploymentRepository.findById(deploymentId).orElse(deployment);
-            DeploymentRuntime runtime = containerRuntimeService.startContainer(refreshedDeployment, type);
+            DeploymentRuntime runtime = containerRuntimeService.startContainer(refreshedDeployment, type, envVars);
 
             // 7. Generate preview URL and complete deployment
             String previewUrl = previewUrlGenerator.generatePreviewUrl(deploymentId, runtime.getHostPort());
+            
+            // Calculate static metrics
+            long durationMs = System.currentTimeMillis() - startTime;
+            deployment.setDeploymentDurationMs(durationMs);
+            String imageName = "deployforge-" + projectId.toString().toLowerCase();
+            String imageTag = "dep-" + deploymentId.toString().toLowerCase();
+            Double sizeMb = metricsCollectionService.getImageSizeMb(imageName, imageTag);
+            deployment.setImageSizeMb(sizeMb);
+            deploymentRepository.save(deployment);
+
             deploymentStatusUpdater.updateStatus(deploymentId, DeploymentStatus.RUNNING, previewUrl, null);
 
             logService.info(deploymentId.toString(), "Deployment completed successfully! Live URL: " + previewUrl, LogCategory.DEPLOYMENT);
 
         } catch (Exception e) {
             log.error("Deployment failed for task: {}", deploymentId, e);
-            logService.error(deploymentId.toString(), "Critical failure: " + e.getMessage(), LogCategory.DEPLOYMENT);
+            String failureSummary = e.getMessage() != null ? e.getMessage() : "An unexpected execution error occurred";
+            logService.error(deploymentId.toString(), "Critical failure during stage " + currentStage + ": " + failureSummary, LogCategory.DEPLOYMENT);
 
             // Check if build completed to segregate build vs runtime failures
             boolean buildCompleted = deploymentRepository.findById(deploymentId)
@@ -126,9 +158,9 @@ public class DockerDeploymentExecutionEngine implements DeploymentExecutionEngin
                     .orElse(false);
 
             if (!buildCompleted) {
-                deploymentStatusUpdater.updateStatus(deploymentId, DeploymentStatus.BUILD_FAILED);
+                deploymentStatusUpdater.updateStatus(deploymentId, DeploymentStatus.BUILD_FAILED, null, null, currentStage, failureSummary);
             } else {
-                deploymentStatusUpdater.updateStatus(deploymentId, DeploymentStatus.RUNTIME_FAILED);
+                deploymentStatusUpdater.updateStatus(deploymentId, DeploymentStatus.RUNTIME_FAILED, null, null, currentStage, failureSummary);
             }
 
             // Cleanup any container states

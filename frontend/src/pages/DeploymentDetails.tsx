@@ -4,6 +4,8 @@ import { apiClient } from '../api/client';
 import { Layout } from '../components/Layout';
 import { Badge } from '../components/Badge';
 import { Terminal } from '../components/Terminal';
+import { Client } from '@stomp/stompjs';
+import SockJS from 'sockjs-client';
 import { 
   ArrowLeft, 
   Clock, 
@@ -11,10 +13,12 @@ import {
   GitCommit, 
   Loader2, 
   Server,
-  CheckCircle2,
-  XCircle,
-  Circle,
-  Terminal as TermIcon
+  Terminal as TermIcon,
+  Cpu,
+  TrendingUp,
+  Activity,
+  History,
+  AlertOctagon
 } from 'lucide-react';
 
 interface Deployment {
@@ -28,13 +32,21 @@ interface Deployment {
   gitCommitHash: string;
   versionTag: string;
   
-  // V2 Container Info
+  // V3 Metadata
   containerId?: string;
   containerName?: string;
   imageTag?: string;
   hostPort?: number;
   buildDurationMs?: number;
   frameworkDetected?: string;
+  triggerType?: string;
+  githubCommitHash?: string;
+  githubCommitMessage?: string;
+  githubAuthor?: string;
+  deploymentDurationMs?: number;
+  imageSizeMb?: number;
+  failureStage?: string;
+  failureSummary?: string;
 }
 
 interface LogLine {
@@ -45,20 +57,38 @@ interface LogLine {
   timestamp: string;
 }
 
+interface TimelineEvent {
+  eventType: string;
+  message: string;
+  createdAt: string;
+}
+
+interface Metrics {
+  cpuUsagePercent: number;
+  memoryUsageMb: number;
+  uptimeSeconds: number;
+}
+
 export const DeploymentDetails: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const [deployment, setDeployment] = useState<Deployment | null>(null);
   const [logs, setLogs] = useState<LogLine[]>([]);
+  const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<'logs' | 'metrics' | 'timeline'>('logs');
 
   const fetchLogsAndStatus = async () => {
     try {
-      const [depRes, logRes] = await Promise.all([
+      const [depRes, logRes, eventRes] = await Promise.all([
         apiClient.get(`/deployments/${id}`),
-        apiClient.get(`/logs/${id}`)
+        apiClient.get(`/logs/${id}`),
+        apiClient.get(`/deployments/${id}/events`)
       ]);
       if (depRes.data.success) setDeployment(depRes.data.data);
       if (logRes.data.success) setLogs(logRes.data.data);
+      if (eventRes.data.success) setEvents(eventRes.data.data);
     } catch (err) {
       console.error('Failed to update deployment logs/status', err);
     } finally {
@@ -66,24 +96,75 @@ export const DeploymentDetails: React.FC = () => {
     }
   };
 
+  const fetchMetrics = async () => {
+    if (!deployment || deployment.status !== 'RUNNING') return;
+    try {
+      const res = await apiClient.get(`/deployments/${id}/metrics`);
+      if (res.data.success) {
+        setMetrics(res.data.data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch container metrics', err);
+    }
+  };
+
+  // 1. Initial REST fetch + Polling fallback for status updates
   useEffect(() => {
     fetchLogsAndStatus();
+  }, [id]);
 
-    // Poll every 2 seconds if status is in active/non-terminal states
-    const interval = setInterval(() => {
-      if (deployment && (
-        deployment.status === 'QUEUED' || 
-        deployment.status === 'CLONING' || 
-        deployment.status === 'BUILDING' || 
-        deployment.status === 'CREATING_IMAGE' || 
-        deployment.status === 'STARTING_CONTAINER'
-      )) {
-        fetchLogsAndStatus();
-      }
-    }, 2000);
-
-    return () => clearInterval(interval);
+  // 2. Metrics Polling Loop (Only if RUNNING)
+  useEffect(() => {
+    if (deployment?.status === 'RUNNING') {
+      fetchMetrics();
+      const interval = setInterval(fetchMetrics, 5000);
+      return () => clearInterval(interval);
+    }
   }, [id, deployment?.status]);
+
+  // 3. WebSocket / STOMP Log and Status Stream Subscriptions
+  useEffect(() => {
+    const wsUrl = `${window.location.origin.replace('3000', '8080')}/ws`;
+    const socket = new SockJS(wsUrl);
+    const client = new Client({
+      webSocketFactory: () => socket,
+      reconnectDelay: 5000,
+      onConnect: () => {
+        // Subscribe to live log streaming
+        client.subscribe(`/topic/deployments/${id}/logs`, (message) => {
+          const body = JSON.parse(message.body);
+          if (body.type === 'LOG') {
+            const mappedLog: LogLine = {
+              id: Math.random().toString(),
+              deploymentId: id || '',
+              message: body.message,
+              level: 'INFO',
+              timestamp: body.timestamp
+            };
+            setLogs(prev => [...prev, mappedLog]);
+          }
+        });
+
+        // Subscribe to live status updates
+        client.subscribe(`/topic/deployments/${id}/status`, (message) => {
+          const body = JSON.parse(message.body);
+          if (body.type === 'STATUS') {
+            // Trigger complete status and timeline refresh
+            fetchLogsAndStatus();
+          }
+        });
+      },
+      onStompError: (frame) => {
+        console.error('STOMP Connection error: ' + frame.body);
+      }
+    });
+
+    client.activate();
+
+    return () => {
+      client.deactivate();
+    };
+  }, [id]);
 
   const getDuration = (start: string, end: string) => {
     if (!start) return '-';
@@ -94,40 +175,13 @@ export const DeploymentDetails: React.FC = () => {
     return `${Math.round(sec / 60)}m ${sec % 60}s`;
   };
 
-  const getTimelineSteps = () => {
-    if (!deployment) return [];
-    const status = deployment.status;
-
-    return [
-      {
-        name: 'Cloning',
-        desc: 'Clones git repository source files via JGit',
-        state: status === 'CLONING' ? 'active' :
-               (status === 'QUEUED') ? 'pending' :
-               (status === 'BUILD_FAILED' && !deployment.frameworkDetected) ? 'failed' : 'complete'
-      },
-      {
-        name: 'Building',
-        desc: 'Executes compiler (npm run build / mvn package)',
-        state: status === 'BUILDING' ? 'active' :
-               (status === 'QUEUED' || status === 'CLONING') ? 'pending' :
-               (status === 'BUILD_FAILED' && deployment.frameworkDetected && !deployment.buildDurationMs) ? 'failed' : 'complete'
-      },
-      {
-        name: 'Creating Image',
-        desc: 'Generates dynamic Dockerfile & runs docker build',
-        state: status === 'CREATING_IMAGE' ? 'active' :
-               (status === 'QUEUED' || status === 'CLONING' || status === 'BUILDING') ? 'pending' :
-               (status === 'BUILD_FAILED' && deployment.buildDurationMs) ? 'failed' : 'complete'
-      },
-      {
-        name: 'Starting Container',
-        desc: 'Launches container runtime and checks connection health',
-        state: status === 'STARTING_CONTAINER' ? 'active' :
-               (status === 'RUNNING') ? 'complete' :
-               (status === 'RUNTIME_FAILED') ? 'failed' : 'pending'
-      }
-    ];
+  const formatUptime = (seconds: number) => {
+    if (!seconds) return '0s';
+    if (seconds < 60) return `${seconds}s`;
+    const min = Math.floor(seconds / 60);
+    const hrs = Math.floor(min / 60);
+    if (hrs > 0) return `${hrs}h ${min % 60}m`;
+    return `${min}m ${seconds % 60}s`;
   };
 
   if (loading && !deployment) {
@@ -144,7 +198,7 @@ export const DeploymentDetails: React.FC = () => {
     return (
       <Layout>
         <div className="text-center py-12">
-          <XCircle className="h-10 w-10 text-rose-500 mx-auto mb-3" />
+          <AlertOctagon className="h-10 w-10 text-rose-500 mx-auto mb-3" />
           <h2 className="text-lg font-bold text-white">Deployment Not Found</h2>
           <p className="text-xs text-muted-foreground mt-1 mb-5">
             This deployment run does not exist or you do not have permission to view it.
@@ -154,8 +208,6 @@ export const DeploymentDetails: React.FC = () => {
       </Layout>
     );
   }
-
-  const steps = getTimelineSteps();
 
   return (
     <Layout>
@@ -171,6 +223,21 @@ export const DeploymentDetails: React.FC = () => {
           </Link>
         </div>
 
+        {/* Diagnostic Error Banner if pipeline crashed */}
+        {deployment.failureSummary && (
+          <div className="bg-rose-950/20 border border-rose-900/30 p-5 rounded-xl flex items-start space-x-3.5">
+            <AlertOctagon className="h-5 w-5 text-rose-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <h3 className="text-xs font-bold text-rose-400 uppercase tracking-wide">
+                Build Pipeline Failed: {deployment.failureStage}
+              </h3>
+              <p className="text-xs text-zinc-400 leading-relaxed font-mono select-all">
+                {deployment.failureSummary}
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Metadata Details Card */}
         <div className="bg-card border border-border p-6 rounded-xl flex flex-col justify-between gap-6 shadow-sm">
           <div className="space-y-4">
@@ -182,11 +249,11 @@ export const DeploymentDetails: React.FC = () => {
                 <Badge status={deployment.status} />
               </div>
               
-              {/* Action / Trigger indicator */}
+              {/* Spinning progress indicators */}
               {(deployment.status === 'QUEUED' || deployment.status === 'CLONING' || deployment.status === 'BUILDING' || deployment.status === 'CREATING_IMAGE' || deployment.status === 'STARTING_CONTAINER') && (
                 <div className="flex items-center space-x-2 text-zinc-400 text-xs font-medium">
                   <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  <span>Deployment in progress...</span>
+                  <span>Deployment in progress (WebSockets Streaming)...</span>
                 </div>
               )}
             </div>
@@ -200,16 +267,14 @@ export const DeploymentDetails: React.FC = () => {
                 <Server className="h-3.5 w-3.5 text-zinc-600" />
                 <span>Duration: {getDuration(deployment.startedAt, deployment.completedAt)}</span>
               </span>
-              {deployment.gitCommitHash && (
-                <span className="flex items-center space-x-1">
-                  <GitCommit className="h-3.5 w-3.5 text-zinc-600" />
-                  <span>Commit: {deployment.gitCommitHash.substring(0, 7)} ({deployment.versionTag})</span>
-                </span>
-              )}
+              <span className="flex items-center space-x-1">
+                <GitCommit className="h-3.5 w-3.5 text-zinc-600" />
+                <span>Commit: {deployment.gitCommitHash ? deployment.gitCommitHash.substring(0, 7) : 'HEAD'}</span>
+              </span>
               {deployment.buildDurationMs && (
                 <span className="flex items-center space-x-1">
                   <TermIcon className="h-3.5 w-3.5 text-zinc-600" />
-                  <span>Compiled in: {Math.round(deployment.buildDurationMs / 1000)}s</span>
+                  <span>Compiled: {Math.round(deployment.buildDurationMs / 1000)}s</span>
                 </span>
               )}
               {deployment.frameworkDetected && (
@@ -219,20 +284,25 @@ export const DeploymentDetails: React.FC = () => {
               )}
             </div>
 
-            {/* Container Details Section */}
+            {/* Container details card if active */}
             {deployment.containerId && (
-              <div className="border-t border-border/60 pt-4 mt-2 grid grid-cols-2 md:grid-cols-4 gap-4 text-[10px] text-zinc-400 font-mono">
+              <div className="border-t border-border/60 pt-4 mt-2 grid grid-cols-2 md:grid-cols-5 gap-4 text-[10px] text-zinc-400 font-mono">
                 <div>
                   <span className="text-zinc-500">Container ID:</span> <span className="text-zinc-300 font-semibold">{deployment.containerId.substring(0, 12)}</span>
                 </div>
                 <div>
-                  <span className="text-zinc-500">Container Name:</span> <span className="text-zinc-300 font-semibold truncate block md:inline max-w-[120px]">{deployment.containerName}</span>
-                </div>
-                <div>
-                  <span className="text-zinc-500">Image Tag:</span> <span className="text-zinc-300 font-semibold">{deployment.imageTag}</span>
+                  <span className="text-zinc-500">Container Name:</span> <span className="text-zinc-300 font-semibold truncate block max-w-[120px]">{deployment.containerName}</span>
                 </div>
                 <div>
                   <span className="text-zinc-500">Host Port:</span> <span className="text-zinc-300 font-semibold">{deployment.hostPort}</span>
+                </div>
+                {deployment.imageSizeMb && (
+                  <div>
+                    <span className="text-zinc-500">Image Size:</span> <span className="text-zinc-300 font-semibold">{Math.round(deployment.imageSizeMb)} MB</span>
+                  </div>
+                )}
+                <div>
+                  <span className="text-zinc-500">Trigger:</span> <span className="text-zinc-300 font-semibold">{deployment.triggerType === 'GITHUB_WEBHOOK' ? 'GitHub Webhook' : 'Manual'}</span>
                 </div>
               </div>
             )}
@@ -249,57 +319,160 @@ export const DeploymentDetails: React.FC = () => {
                   <ExternalLink className="h-3.5 w-3.5" />
                 </a>
                 <Link
-                  to={`/preview/${deployment.id}`}
-                  className="inline-flex items-center space-x-1.5 text-xs font-semibold text-emerald-400 hover:text-emerald-300 transition-colors border border-emerald-900/40 bg-emerald-950/20 px-3 py-1.5 rounded-lg"
+                  to={`/deployment/${deployment.id}/preview`}
+                  className="inline-flex items-center space-x-1.5 text-xs font-semibold text-primary hover:text-primary/95 transition-colors border border-primary/20 bg-primary/5 px-3 py-1.5 rounded-lg cursor-pointer"
                 >
                   <span>Open Local Preview Frame</span>
                   <ExternalLink className="h-3.5 w-3.5" />
                 </Link>
-                <span className="text-[10px] text-zinc-500 hidden sm:inline select-none">
-                  (Simulated container iframe preview)
-                </span>
               </div>
             )}
           </div>
         </div>
 
-        {/* Steps Timeline Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 bg-card border border-border p-6 rounded-xl shadow-sm">
-          {steps.map((step, idx) => {
-            let Icon = Circle;
-            let iconColor = 'text-zinc-600';
-            let bgClass = 'bg-zinc-950';
+        {/* Navigation tabs for Logs vs Metrics vs Timeline */}
+        <div className="flex border-b border-border space-x-1 font-semibold text-xs">
+          <button
+            onClick={() => setActiveTab('logs')}
+            className={`flex items-center space-x-2 px-4 py-2 border-b-2 cursor-pointer transition-all ${
+              activeTab === 'logs' 
+                ? 'border-primary text-primary bg-primary/5' 
+                : 'border-transparent text-muted-foreground hover:text-white'
+            }`}
+          >
+            <TermIcon className="h-3.5 w-3.5" />
+            <span>Console Logs</span>
+          </button>
+          
+          {deployment.status === 'RUNNING' && (
+            <button
+              onClick={() => setActiveTab('metrics')}
+              className={`flex items-center space-x-2 px-4 py-2 border-b-2 cursor-pointer transition-all ${
+                activeTab === 'metrics' 
+                  ? 'border-primary text-primary bg-primary/5' 
+                  : 'border-transparent text-muted-foreground hover:text-white'
+              }`}
+            >
+              <Cpu className="h-3.5 w-3.5" />
+              <span>Container Performance</span>
+            </button>
+          )}
 
-            if (step.state === 'complete') {
-              Icon = CheckCircle2;
-              iconColor = 'text-emerald-500';
-              bgClass = 'bg-emerald-950/20';
-            } else if (step.state === 'active') {
-              Icon = Loader2;
-              iconColor = 'text-primary animate-spin';
-              bgClass = 'bg-primary/5';
-            } else if (step.state === 'failed') {
-              Icon = XCircle;
-              iconColor = 'text-rose-500';
-              bgClass = 'bg-rose-950/20';
-            }
-
-            return (
-              <div key={idx} className={`p-4 rounded-xl border border-border/80 flex items-start space-x-3 ${bgClass}`}>
-                <Icon className={`h-5 w-5 shrink-0 mt-0.5 ${iconColor}`} />
-                <div className="space-y-0.5">
-                  <h3 className="text-xs font-bold text-white">{step.name}</h3>
-                  <p className="text-[10px] text-muted-foreground leading-normal">{step.desc}</p>
-                </div>
-              </div>
-            );
-          })}
+          <button
+            onClick={() => setActiveTab('timeline')}
+            className={`flex items-center space-x-2 px-4 py-2 border-b-2 cursor-pointer transition-all ${
+              activeTab === 'timeline' 
+                ? 'border-primary text-primary bg-primary/5' 
+                : 'border-transparent text-muted-foreground hover:text-white'
+            }`}
+          >
+            <History className="h-3.5 w-3.5" />
+            <span>Events Timeline ({events.length})</span>
+          </button>
         </div>
 
-        {/* Terminal logs display */}
-        <div className="space-y-3">
-          <h2 className="text-sm font-semibold text-white">Execution Console Logs</h2>
-          <Terminal logs={logs} />
+        {/* Tab display mapping */}
+        <div className="mt-4">
+          
+          {/* TAB 1: STREAMING CONSOLE LOGS */}
+          {activeTab === 'logs' && (
+            <div className="space-y-4">
+              <Terminal logs={logs} />
+            </div>
+          )}
+
+          {/* TAB 2: LIVE METRICS */}
+          {activeTab === 'metrics' && deployment.status === 'RUNNING' && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              
+              <div className="bg-card border border-border p-6 rounded-xl space-y-3.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold tracking-wider text-zinc-500 uppercase">CPU Usage</span>
+                  <Cpu className="h-4 w-4 text-primary" />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-2xl font-bold font-mono text-white">
+                    {metrics ? `${metrics.cpuUsagePercent.toFixed(2)}%` : '0.00%'}
+                  </div>
+                  <p className="text-[10px] text-zinc-500">Real-time docker stats query</p>
+                </div>
+              </div>
+
+              <div className="bg-card border border-border p-6 rounded-xl space-y-3.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold tracking-wider text-zinc-500 uppercase">Memory Footprint</span>
+                  <TrendingUp className="h-4 w-4 text-emerald-400" />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-2xl font-bold font-mono text-white">
+                    {metrics ? `${metrics.memoryUsageMb.toFixed(1)} MB` : '0.0 MB'}
+                  </div>
+                  <p className="text-[10px] text-zinc-500">Shared engine allocation limits</p>
+                </div>
+              </div>
+
+              <div className="bg-card border border-border p-6 rounded-xl space-y-3.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold tracking-wider text-zinc-500 uppercase">Container Uptime</span>
+                  <Activity className="h-4 w-4 text-indigo-400" />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-2xl font-bold font-mono text-white">
+                    {metrics ? formatUptime(metrics.uptimeSeconds) : '0s'}
+                  </div>
+                  <p className="text-[10px] text-zinc-500">Live duration since docker execution</p>
+                </div>
+              </div>
+
+            </div>
+          )}
+
+          {/* TAB 3: TIMELINE REPLAY */}
+          {activeTab === 'timeline' && (
+            <div className="bg-card border border-border p-6 rounded-xl space-y-6">
+              <h3 className="text-xs font-bold text-zinc-400 tracking-wider uppercase">Pipeline Milestones</h3>
+              
+              <div className="relative border-l border-zinc-800 ml-3.5 space-y-6">
+                {events.length === 0 ? (
+                  <div className="pl-6 text-xs text-muted-foreground">
+                    No milestone logs registered for this run yet.
+                  </div>
+                ) : (
+                  events.map((e, index) => (
+                    <div key={index} className="relative pl-6">
+                      
+                      {/* Left Dot */}
+                      <span className={`absolute -left-1.5 top-1.5 h-3 w-3 rounded-full border ${
+                        e.eventType === 'DEPLOYMENT_FAILED'
+                          ? 'bg-rose-950 border-rose-500'
+                          : e.eventType === 'DEPLOYMENT_READY'
+                          ? 'bg-emerald-950 border-emerald-500'
+                          : 'bg-zinc-950 border-primary'
+                      }`} />
+
+                      <div className="space-y-1 font-mono">
+                        <div className="flex items-center space-x-2 text-xs font-bold">
+                          <span className={`${
+                            e.eventType === 'DEPLOYMENT_FAILED'
+                              ? 'text-rose-400'
+                              : e.eventType === 'DEPLOYMENT_READY'
+                              ? 'text-emerald-400'
+                              : 'text-white'
+                          }`}>{e.eventType}</span>
+                          <span className="text-[10px] text-zinc-600">
+                            {new Date(e.createdAt).toLocaleTimeString()}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-zinc-500 leading-relaxed">{e.message}</p>
+                      </div>
+
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
         </div>
       </div>
     </Layout>

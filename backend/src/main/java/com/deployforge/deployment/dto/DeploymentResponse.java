@@ -27,13 +27,25 @@ public class DeploymentResponse {
     private String gitCommitHash;
     private String versionTag;
     
-    // V2 Container Info
+    // V3 Container Info
     private String containerId;
     private String containerName;
     private String imageTag;
     private Integer hostPort;
     private Long buildDurationMs;
     private String frameworkDetected;
+
+    // V3 Platform Info
+    private String triggerType;
+    private String githubCommitHash;
+    private String githubCommitMessage;
+    private String githubAuthor;
+    private LocalDateTime githubPushTimestamp;
+    private Long deploymentDurationMs;
+    private Double imageSizeMb;
+    private UUID sourceDeploymentId;
+    private String failureStage;
+    private String failureSummary;
 
     public static DeploymentResponse fromEntity(Deployment deployment, DeploymentVersion version, DeploymentRuntime runtime) {
         Long duration = null;
@@ -57,6 +69,16 @@ public class DeploymentResponse {
                 .hostPort(runtime != null ? runtime.getHostPort() : null)
                 .buildDurationMs(duration)
                 .frameworkDetected(deployment.getFrameworkDetected())
+                .triggerType(deployment.getTriggerType() != null ? deployment.getTriggerType().name() : "MANUAL")
+                .githubCommitHash(deployment.getGithubCommitHash())
+                .githubCommitMessage(deployment.getGithubCommitMessage())
+                .githubAuthor(deployment.getGithubAuthor())
+                .githubPushTimestamp(deployment.getGithubPushTimestamp())
+                .deploymentDurationMs(deployment.getDeploymentDurationMs())
+                .imageSizeMb(deployment.getImageSizeMb())
+                .sourceDeploymentId(deployment.getSourceDeploymentId())
+                .failureStage(deployment.getFailureStage())
+                .failureSummary(deployment.getFailureSummary())
                 .build();
     }
 
